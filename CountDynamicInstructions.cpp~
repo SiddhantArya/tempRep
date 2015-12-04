@@ -1,0 +1,93 @@
+#define DEBUG_TYPE "dynamicCount"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/TypeBuilder.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/InstIterator.h"
+#include <map>
+#include "stdio.h"
+#include "string.h"
+
+using namespace llvm;
+namespace {
+	static IRBuilder<> builder(getGlobalContext());
+	
+  struct DynamicCount : public ModulePass {
+    static char ID; // Pass identification, replacement for typeid
+
+    //iterate through all instructions, fill map.
+    DynamicCount() : ModulePass(ID) {
+			errs() << "Dynamic Module Created" << "\n";
+		}
+
+    bool runOnModule(Module &M){
+			FunctionType *FT = FunctionType::get(
+				Type::getVoidTy(getGlobalContext()), //return type
+        Type::getInt32Ty(getGlobalContext()),	//parameter types
+				(Type *)0
+			);
+			//get the function
+			Constant* c = M.getOrInsertFunction("incrementCounter",FT);
+			Function* R = cast<Function>(c);
+			
+			std::string mainString = "main";
+			std::string phiString = "phi";
+      
+			//iterate over all functions in module
+			for (Module::iterator F = M.begin(), Fe = M.end(); F != Fe; ++F){
+				//iterate over all blocks in a function (that aren't the instrumented
+				for (Function::iterator B = F->begin(), Be = F->end(); B != Be; ++B) {
+					//iterate over all instructions in each block
+					BasicBlock::iterator I = B->begin(), Ie = B->end();
+					//grab first opcode value in case it is phi
+					Value *opCodeVal = builder.getInt32(I->getOpcode());
+					int counter = 0;
+					//iterate over phi functions and count them
+					while(phiString.compare((std::string)I->getOpcodeName()) == 0 && I != Ie) {
+						counter++;
+						++I;
+					}
+					//insert phi counters after them all
+					for (int i=0; i<counter; i++) {
+						builder.SetInsertPoint(I);
+						builder.CreateCall(R, opCodeVal);
+					}
+					//insert counters for all other instructions
+					for (; I != Ie; ++I) {
+						builder.SetInsertPoint(I);
+						opCodeVal = builder.getInt32(I->getOpcode());
+						builder.CreateCall(R, opCodeVal);
+		  		}
+				}
+				//add print result function to end of main...
+				if(mainString.compare((std::string)F->getName()) == 0){
+					//move to last block in function
+					Function::iterator B = F->end();
+					--B;
+					//move to last instruction in block
+					BasicBlock::iterator I = B->end();
+					--I;
+					//fetch the printResults function
+					FunctionType *FTmain = FunctionType::get(
+						Type::getVoidTy(getGlobalContext()),
+						(Type *)0
+					);
+					Constant* cmain = M.getOrInsertFunction("printResults",FTmain);
+					Function* Rmain = cast<Function>(cmain);
+					//insert call to printResults
+					builder.SetInsertPoint(I);
+					builder.CreateCall(Rmain);
+				}
+			}
+			//uncomment if you want to see all of IR
+			//M.dump();
+      return false;
+    }
+  };
+}
+
+char DynamicCount::ID = 0;
+static RegisterPass<DynamicCount> X("DynamicCount", "Dynamic Count Pass",false,false);

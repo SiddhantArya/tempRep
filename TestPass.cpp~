@@ -1,0 +1,40 @@
+#define DEBUG_TYPE "ConstPass"
+#include <map>
+#include "worklistObj.cpp"
+
+
+//opt -load $LLVMLIB/CSE231.so -ConstPass < $BENCHMARKS/gcd/gcd.bc > temp.instrumented.bc
+
+using namespace llvm;
+namespace {
+	static IRBuilder<> builder(getGlobalContext());
+	
+  struct testPass : public ModulePass {
+    static char ID; // Pass identification, replacement for typeid
+
+    //iterate through all instructions, fill map.
+    testPass() : ModulePass(ID) {
+			errs() << "Range Module Created" << "\n";
+		}
+
+    bool runOnModule(Module &M){
+      
+      //create the worklist object
+      workListObj* temp = new workListObj(10010);
+      temp->init(M);
+      temp->run();
+      //print results...
+      M.dump();
+      temp->printTop();
+      temp->printBottom();   
+
+      //Do CSE optimization here:
+
+      //uncomment if you want to see all of IR
+			return false;
+    }
+  };
+}
+
+char testPass::ID = 0;
+static RegisterPass<testPass> X("testPass", "test Pass",false,false);

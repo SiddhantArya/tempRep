@@ -1,0 +1,399 @@
+#include <set>
+#include <algorithm>
+#include <iterator>
+#include "llvm/IR/Value.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/TypeBuilder.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/InstIterator.h"
+#include "llvm/Support/CFG.h"
+#include "stdio.h"
+#include "string.h"
+#include <vector>
+#include <algorithm>
+
+using namespace std;
+using namespace llvm;
+
+/*
+  opt -load $LLVMLIB/CSE231.so -CSEPass < $BENCHMARKS/gcd/gcd.bc > temp.instrumented.bc
+
+  TODO : needs testing
+      -do CSE optimization
+        -needs constant folding before it can be really effective
+        -go over each BBNode and replace CSEs with loads
+
+  Important info:
+  http://llvm.org/docs/ProgrammersManual.html#replacing-an-instruction-with-another-value
+*/
+
+class Edge
+{
+  public:
+  bool isTop;
+  bool isBottom;
+  set<Instruction *> aExpr;
+
+  Edge(){
+    isTop = false;
+    isBottom = true;
+  }
+  //copy constructor for edge
+  Edge(Edge * parent){
+    isTop = parent->isTop;
+    isBottom = parent->isBottom;
+    aExpr.insert(parent->aExpr.begin(),parent->aExpr.end());
+  }
+
+  void addValue(Instruction * I) {
+    //foreach available expression, see if this is equivalent to any existing.
+    set<Instruction *>::iterator it;
+    for(it = aExpr.begin(); it != aExpr.end(); it++) {
+      Instruction * temp = *it;
+      //if it is, then skip it.
+      if(I->isIdenticalTo(temp)){
+        return;
+      }
+    }
+    //if it isn't, then store it.
+    aExpr.insert(I);
+  }
+  void removeValue(Instruction * key) {
+    if(aExpr.count(key) == 1) { //check that key exists
+      aExpr.erase(aExpr.find(key));
+    }
+  }
+};
+
+class Node
+{
+  public:
+  Instruction * oI;
+  Edge * data;
+  
+  Node(Instruction * I){
+    data = new Edge();
+    oI = I;
+  }
+};
+
+class BBNode
+{
+  public:
+  int bID;
+  BasicBlock * originalBB;
+  Edge * incoming;
+  //can have multiple outgoing edges
+  map<int, Edge *> outgoing;
+  vector<Node *> nodes;
+  
+  BBNode(int ibID, BasicBlock * BB){
+    bID = ibID;
+    errs() << "Block Created" << "\n";
+    originalBB = BB;
+    incoming = new Edge();
+    //loop over each instruction in orginalBB and create a Node to point to them
+    BasicBlock::iterator I = originalBB->begin(), Ie = originalBB->end();
+    for (; I != Ie; ++I) {
+      nodes.push_back(new Node(I));
+    }
+  }
+  //use the names of the successor BBs to add the outgoing edges
+  void setup() {
+    for (succ_iterator SI = succ_begin(originalBB), E = succ_end(originalBB); SI != E; ++SI) {
+      BasicBlock *Succ = *SI;
+      int id = atoi(Succ->getName().str().c_str());
+      outgoing[id] = new Edge();
+    }
+  }
+};
+
+class FlowFunctions
+{
+  public:
+  FlowFunctions(){
+    errs() << "Flow Functions Created" << "\n";
+  }
+  
+  map<int, Edge *> m(Edge * in, BBNode * N){
+    map<int, Edge *> result;
+    //go over each instruction in the BB and apply the flow function!!!
+    for(unsigned int i=0;i<N->nodes.size() - 1;i++){
+      in = mapInstruction(in, N->nodes[i]);
+    }
+    in->isBottom = false;
+    
+    //use the terminating instructions to make an edge for each successor
+    for (succ_iterator SI = succ_begin(N->originalBB), E = succ_end(N->originalBB); SI != E; ++SI) {
+      BasicBlock *Succ = *SI;
+      int id = atoi(Succ->getName().str().c_str());
+      //TODO : this should have more parameters in the future...
+      result[id] = mapTerminator(new Edge(in));
+    }
+    return result;
+  }
+  //do flow function calls here
+  Edge * mapInstruction(Edge * in, Node *node) {
+    //free old input to the node and save the new one
+    free(node->data);
+    node->data = new Edge(in); //makes a copy
+    //treat stores differently: they destroy available expressions
+    if(node->oI->getOpcode() == Instruction::Store){
+      //in->removeValue((Instruction *)node->oI->getOperand(1));
+    } else {
+      in->addValue(node->oI);
+    }
+    return in;
+  }
+  
+  Edge * mapTerminator(Edge * in) {
+    //TODO : add support for terminator instructions
+    return in;
+  }
+};
+
+class latticeObj
+{
+  public:
+    latticeObj(){
+      errs() << "Lattice Created" << "\n";
+    }
+    //checks for equality between edges
+    bool comparator(Edge * F1,Edge * F2){
+      if(F1->isTop != F2->isTop){
+        return false;
+      }
+      //1. check that size is the same
+      if(F1->aExpr.size() != F2->aExpr.size()){
+        return false;
+      }
+      //2. iterate over each value and find the corresponding fact.
+      set<Instruction *>::iterator it;
+      for(it = F1->aExpr.begin(); it != F1->aExpr.end(); it++) {
+        //2a. check that they both have the same entry
+        Instruction * entry = *it;
+        if(F2->aExpr.count(entry) != 1) {
+          return false;
+        }
+      }
+      return true;
+    }
+    //merge vector of edges.  this is an intersection of sets
+    Edge * merge(vector<Edge *> edges){
+      //create resulting edge
+      Edge * result;
+      if(edges.size() > 1) {
+        result = new Edge();
+        result->isBottom = false;
+        set<Instruction *> * previous = &edges[0]->aExpr;
+        for(unsigned int i=1;i<edges.size();i++){
+          set<Instruction *> intersect;
+          set_intersection(previous->begin(),previous->end(),edges[i]->aExpr.begin(),edges[i]->aExpr.end(),std::inserter(intersect,intersect.begin()));
+          result->aExpr = intersect;
+          previous = &edges[i]->aExpr;
+        }
+      } else {
+        if(edges.size() == 1){
+          result = new Edge(edges[0]);
+        } else {
+          result = new Edge();
+        }
+      }
+      return result;
+    }
+};
+
+class workListObj
+{
+  private:
+    
+    latticeObj* optimizationLattice;
+    FlowFunctions* FF;
+    std::map<int, BBNode*> bbMap;
+    
+  public:
+    //initialization: setup worklist components
+    workListObj(int type){
+      llvm::errs() << "Test Worklist Created" << "\n";
+      optimizationLattice = new latticeObj();
+      FF = new FlowFunctions();
+    }
+
+    BBNode* lookupBB(llvm::StringRef tempID){
+      int id = atoi(tempID.str().c_str());
+      return bbMap[id];
+    }
+    
+    //connect references to BB and instructions
+    //initialize all edges to bottom
+    void init(llvm::Module &M){
+      errs() << "Initializing all edges to bottom..." << "\n";
+      //iterate over all functions in module
+      int bbID = 0;
+			for (Module::iterator F = M.begin(), Fe = M.end(); F != Fe; ++F){
+				//iterate over all blocks in a function (that aren't the instrumented
+				for (Function::iterator B = F->begin(), Be = F->end(); B != Be; ++B) {
+          //create a BBNode for each basic block
+          B->setName(llvm::Twine(bbID));
+          //create a BBNode for each block
+          bbMap[bbID] = new BBNode(bbID,B);
+          bbID++;
+				}
+        //the start of every function is set to top
+        Function::iterator first = F->begin();
+        lookupBB(first->getName())->incoming->isTop = true;
+			}
+      //TODO : need to allow for user input at a function level?
+
+      //setup the BBNodes with their outgoing edges now that they have ids
+      for(map<int, BBNode*>::iterator it = bbMap.begin(); it != bbMap.end(); it++){
+        it->second->setup();
+      }
+    }
+    
+    vector<Edge *> getIncomingEdges(BBNode* N){
+      vector<Edge *> incomingEdges;
+      int id = atoi(N->originalBB->getName().str().c_str());
+      //3. get incoming edges from predecessors
+      for (pred_iterator PI = pred_begin(N->originalBB), E = pred_end(N->originalBB); PI != E; ++PI) {
+        //add to a vector of edges
+        BasicBlock *Pred = *PI;
+        incomingEdges.push_back(lookupBB(Pred->getName())->outgoing[id]);
+      }
+      //add currently saved incoming data as well
+      if(N->bID == 0){
+        incomingEdges.push_back(N->incoming);
+      }
+      return incomingEdges;
+    }
+
+    //run does the actual worklist algorithm...
+    void run(){
+      errs() << "Running worklist algorithm..." << "\n";
+      
+      //1. create a vector of BBNodes
+      vector<BBNode *> worklist;
+      //2. enqueue each BBNode
+      map<int, BBNode*>::iterator it;
+      for(it = bbMap.begin(); it != bbMap.end(); it++) {
+        worklist.push_back(it->second);
+      }
+
+      //print out starting results of top state for each block
+      errs() << "START" << "\n";
+      for(it = bbMap.begin(); it != bbMap.end(); it++) {
+        BBNode * temp = it->second;
+        llvm::errs() << temp->originalBB->getName() << " : isTop :" << temp->incoming->isTop << "\n";
+      }
+      
+      while(worklist.size() > 0) {
+        //get any BBNode
+        BBNode *currentNode = worklist.back();
+        worklist.pop_back();
+        
+        //3. get incoming edges from predecessors
+        vector<Edge *> incomingEdges = getIncomingEdges(currentNode);
+        //merge these incoming edges to form the node input
+        Edge * in = optimizationLattice->merge(incomingEdges);
+        //set incoming edge to the new merged one
+        free(currentNode->incoming);
+        currentNode->incoming = in;
+        Edge * inCopy = new Edge(in);
+        
+        //TODO : finish this
+        //4. run flow function on BBNode
+        map<int, Edge *> out = FF->m(inCopy,currentNode);
+        
+        //foreach output edge...
+        map<int, Edge *>::iterator it;
+        for(it = out.begin(); it != out.end(); it++) {
+          int id = it->first;
+          Edge * edgeOut = it->second;
+          //5. check if the output edge has changed:
+          if(optimizationLattice->comparator(edgeOut,currentNode->outgoing[id]) == false){
+            free(currentNode->outgoing[id]);
+            currentNode->outgoing[id] = edgeOut;
+            BBNode * N = bbMap[id];
+            vector<Edge *> succEdges = getIncomingEdges(N);
+            Edge * result = optimizationLattice->merge(incomingEdges);
+            //6. if change: update the incoming edge and enqueue successors
+            if(optimizationLattice->comparator(result,N->incoming) == false) {
+              free(N->incoming);
+              N->incoming = result;
+              worklist.push_back(N);
+            }
+          }
+        }
+      }
+
+      //print out results of whether its top or not
+      errs() << "RESULTS" << "\n";
+      for(it = bbMap.begin(); it != bbMap.end(); it++) {
+        BBNode * temp = it->second;
+        llvm::errs() << temp->originalBB->getName() << " : isTop :" << temp->incoming->isTop << "\n";
+      }
+    }
+
+//TODO : redo these
+//PRINT FUNCTIONS (just for debugging)
+    void printBottom(){
+      errs() << "\n\n\nOutgoing edges:\n";
+      //print out the relations for each block
+      map<int, BBNode*>::iterator it;
+      for(it = bbMap.begin(); it != bbMap.end(); it++) {
+        BBNode * cBB = it->second;
+        //print the BB id
+        errs() << "-=BLOCK " << cBB->originalBB->getName() << " =-\n";
+        //print output foreach successor
+        map<int, Edge *>::iterator out;
+        for(out = cBB->outgoing.begin(); out != cBB->outgoing.end(); out++) {
+          errs() << "--Sucessor:  #" << out->first << "\n";
+          Edge * cEdge = out->second;
+          //print the input facts
+          errs() << "\tEdge : { ";
+//
+          if(cEdge->isBottom == true){
+            errs() << "Top }\n";
+          } else {
+            set<Instruction *>::iterator itr;
+            for(itr = cEdge->aExpr.begin(); itr != cEdge->aExpr.end(); itr++) {
+              printEntry(*itr);
+            }
+            errs() << " } \n";
+          }
+        }
+      }
+    }
+    void printTop(){
+      errs() << "\n\n\nIncoming edges:\n";
+      //print out the relations for each block
+      map<int, BBNode*>::iterator it;
+      for(it = bbMap.begin(); it != bbMap.end(); it++) {
+        BBNode * cBB = it->second;
+        Edge * in = cBB->incoming;
+        //print the BB id
+        errs() << "-=BLOCK " << cBB->originalBB->getName() << " =-\n";
+        //print the input facts
+        errs() << "Edge : { ";
+        if(in->isBottom == true){
+          errs() << "* } \n";
+        } else {
+          set<Instruction *>::iterator itr;
+          for(itr = in->aExpr.begin(); itr != in->aExpr.end(); itr++) {
+            printEntry(*itr);
+          }
+          errs() << " } \n";
+        }
+      }
+    }
+
+    //print out the value and the info it is pointing to...
+    void printEntry(Instruction * v){
+      errs() << "{" << *v << "}";
+      errs() << ",\n";
+    }
+};

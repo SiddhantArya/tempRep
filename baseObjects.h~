@@ -1,0 +1,160 @@
+class BBNode
+{
+  public:
+  int bID;
+  BasicBlock * originalBB;
+  Edge * incoming;
+  //can have multiple outgoing edges
+  map<int, Edge *> outgoing;
+  vector<Node *> nodes;
+  
+  BBNode(int ibID, BasicBlock * BB){
+    bID = ibID;
+    errs() << "Block Created" << "\n";
+    originalBB = BB;
+    incoming = new Edge();
+    //loop over each instruction in orginalBB and create a Node to point to them
+    BasicBlock::iterator I = originalBB->begin(), Ie = originalBB->end();
+    for (; I != Ie; ++I) {
+      nodes.push_back(new Node(I));
+    }
+  }
+  //use the names of the successor BBs to add the outgoing edges
+  void setup() {
+    for (succ_iterator SI = succ_begin(originalBB), E = succ_end(originalBB); SI != E; ++SI) {
+      BasicBlock *Succ = *SI;
+      int id = atoi(Succ->getName().str().c_str());
+      outgoing[id] = new Edge();
+    }
+  }
+};
+
+class FlowFunctions
+{
+  public:
+  FlowFunctions(){
+    errs() << "Flow Functions Created" << "\n";
+  }
+  
+  map<int, Edge *> m(Edge * in, BBNode * N){
+    map<int, Edge *> result;
+    //go over each instruction in the BB and apply the flow function!!!
+    for(unsigned int i=0;i<N->nodes.size() - 1;i++){
+      in = mapInstruction(in, N->nodes[i]);
+    }
+    in->isTop = false;
+    //then use the terminating instructions to make an edge for each successor
+    int index = 0;
+    for (succ_iterator SI = succ_begin(N->originalBB), E = succ_end(N->originalBB); SI != E; ++SI) {
+      BasicBlock *Succ = *SI;
+      int id = atoi(Succ->getName().str().c_str());
+      result[id] = mapTerminator(new Edge(in), index, N->originalBB->getTerminator());
+      index++;
+    }
+    return result;
+  }
+
+  //do flow function calls here
+  Edge * mapInstruction(Edge *in, Node *node) {
+    if(node->oI->getOpcode() == Instruction::ICmp) {
+      errs() << "icmp detected!\n";
+      in->kill(node->oI->getOperand(0));
+      //add this fact to a list of "pending" for the edge.  On actual branching, we will have to add the range, or invert the range and add that.
+      in->pending->push_back(node->oI);
+      in->isTop = false;
+    }
+    //load case: save this assignment to fact
+    if(node->oI->getOpcode() == Instruction::Store) {
+      errs() << "store detected!\n";
+      //kill current ranges for this fact since it is being overwritten
+      in->kill(node->oI->getOperand(1));
+      //TODO : should we support simple addition an subtraction?
+      //only do save if the store operand is a simple constant
+      if(isa<Constant>(node->oI->getOperand(0))) {
+        in->addValue(node->oI->getOperand(1),node->oI->getOperand(0));
+      }
+      in->isTop = false;
+    }
+    return in;
+  }
+  //TODO : need to consider switch terminators?!
+  Edge * mapTerminator(Edge * in, int sIndex, Instruction * I) {
+    //if the terminating instruction is a conditional branch, then evaluate it!
+    if(I->getOpcode() == Instruction::Br) {
+      if(I->getNumOperands() == 3) {
+        CmpInst * conditional = dyn_cast<CmpInst>(I->getOperand(0));
+        CmpInst::Predicate predi = conditional->getPredicate();
+        //if it is the false case, then get the inverse predicate
+        if(sIndex == 1){
+          predi = CmpInst::getInversePredicate(predi);
+        }
+        //errs() << "CONDITIONAL INS: "<< *conditional << "\n";
+        //Add the range:
+        in->addRange(conditional,predi);
+      }
+    }
+    return in;
+  }
+};
+
+
+class latticeObj
+{
+  public:
+    latticeObj(){
+      errs() << "Lattice Created" << "\n";
+    }
+    //checks for equality between edges
+    bool comparator(Edge * F1,Edge * F2){
+      if(F1->isTop != F2->isTop){
+        return false;
+      }
+      //1. check that size is the same
+      if(F1->data->size() != F2->data->size()){
+        return false;
+      }
+      //2. iterate over each value and find the corresponding fact.
+      map<Value *,Fact *>::iterator it;
+      for(it = F1->data->begin(); it != F1->data->end(); it++) {
+        //2a. check that they both have the same entry
+        if(F2->data->count(it->first) != 1) {
+          return false;
+        }
+        Fact * entry1 = it->second;
+        Fact * entry2 = F2->data->find(it->first)->second;
+        //check ranges size
+        if(entry1->ranges.size() != entry2->ranges.size()){
+          return false;
+        }
+        vector<Range>::iterator itr1;
+        for(itr1 = entry1->ranges.begin(); itr1 != entry1->ranges.end(); itr1++) {
+          vector<Range>::iterator itr2;
+          bool isFound = false;
+          for(itr2 = entry2->ranges.begin(); itr2 != entry2->ranges.end(); itr2++) {
+            if(*itr1 == *itr2){
+              isFound = true;
+            }
+          }
+          if(isFound == false){
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+    //merge vector of edges
+    Edge * merge(vector<Edge *> edges){
+      //create resulting edge
+      Edge * result = new Edge();
+      //for each edge:
+      for(unsigned int i=0;i<edges.size();i++){
+        //merge all the facts of the incoming edges
+        map<Value *,Fact *>::iterator it;
+        for(it = edges[i]->data->begin(); it != edges[i]->data->end(); it++) {
+          result->addFact(it->first, it->second);
+        }
+      }
+      result->isTop = result->data->size() == 0;
+      return result;
+    }
+};

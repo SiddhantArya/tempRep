@@ -1,0 +1,77 @@
+#include <set>
+#include <algorithm>
+#include <iterator>
+#include "llvm/IR/Value.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/TypeBuilder.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/InstIterator.h"
+#include "stdio.h"
+#include "string.h"
+#include <vector>
+
+using namespace std;
+using namespace llvm;
+
+struct Fact {
+  bool isTop;
+  bool isBottom;
+  set<llvm::Value,llvm::Value> data;
+};
+
+class Node
+{
+  public:
+  llvm::Instruction * originalInstruction;
+  Fact * data;
+
+  Node(llvm::Instruction I){
+    
+  }
+};
+
+class BBNode
+{
+  public:
+    llvm::BasicBlock * originalBB;
+    Fact * data;
+    vector<Node> nodes;
+    
+    BBNode(llvm::BasicBlock BB){
+      
+    }
+};
+
+/*
+union example:
+set<pair<int,int> > a, b, uni;
+    set_union (a.begin(), a.end(),
+               b.begin(), b.end(),
+               inserter(uni, uni.begin()));
+*/
+
+class latticeObj
+{
+  private:
+  public:
+    latticeObj(){
+      llvm::errs() << "Lattice Created" << "\n";
+    }
+    //TODO : behavior changes for each of these if the set has isTop or isBottom flags set to true
+    //partially orders data (probably not necessary)
+    void comparator(float delta){
+      
+    }
+    //merge 2 sets default function
+    void merge(float delta){
+      
+    }
+    //join 2 sets default function
+    void join(float delta){
+      
+    }
+};

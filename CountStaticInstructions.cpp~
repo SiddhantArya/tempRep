@@ -1,0 +1,66 @@
+//To Call:
+//opt -analyze -load $LLVMLIB/CSE231.so -StaticCount < $BENCHMARKS/welcome/welcome.bc > $OUTPUTLOGS/welcome.static.log
+
+#define DEBUG_TYPE "StaticCount"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/InstIterator.h"
+#include <map>
+
+using namespace llvm;
+namespace {
+
+  struct StaticCount : public ModulePass {
+    static char ID; // Pass identification, replacement for typeid
+
+    //iterate through all instructions, fill map.
+    std::map<std::string, int> iMap;
+		//used to access the iMap in the print function
+		std::map<std::string, int>* access;
+    StaticCount() : ModulePass(ID) {
+			errs() << "Module Created" << "\n";
+			access = &iMap;
+		}
+			
+    bool runOnModule(Module &M){
+			//iterate over all functions in module
+			for (Module::iterator F = M.begin(), e = M.end(); F != e; ++F){
+				//iterate over all instructions in each function
+				for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
+    			iMap[&*I->getOpcodeName()] = iMap[&*I->getOpcodeName()] + 1;
+    		}
+			}
+
+			int total = 0;
+		  //iterate map and print.
+			std::map<std::string, int>::iterator it;
+		  for(it = access->begin(); it != access->end(); it++) {
+		      std::string key = it->first;
+		      int value = it->second;
+					total += value;
+		      errs() << key << "\t" << value << "\n" ;        
+		  }
+			errs() << "TOTAL" << "\t" << total << "\n" ;
+      return false;
+    }
+		
+		void print(llvm::raw_ostream &O, const Module *M) const {
+			int total = 0;
+			std::map<std::string, int>::iterator it;
+		  //iterate map and print.
+		  for(it = access->begin(); it != access->end(); it++) {
+		      std::string key = it->first;
+		      int value = it->second;
+					total += value;
+		      O << key << "\t" << value << "\n" ;        
+		  }
+			O << "TOTAL" << "\t" << total << "\n" ;
+		}
+  };
+}
+
+char StaticCount::ID = 0;
+static RegisterPass<StaticCount> X("StaticCount", "Static Count Pass");

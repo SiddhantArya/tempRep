@@ -1,0 +1,128 @@
+#include "passObjects.cpp"
+
+class workListObj
+{
+  private:
+    
+    latticeObj* optimizationLattice;
+    FlowFunctions* FF;
+    std::map<int, BBNode*> bbMap;
+    
+  public:
+    //initialization: setup worklist components
+    workListObj(int type){
+      llvm::errs() << "Test123 Worklist Created" << "\n";
+      //TODO : depending on the optimization type, initialize the correct lattice and flow functions
+      optimizationLattice = new latticeObj();
+      FF = new FlowFunctions();
+    }
+
+    BBNode* lookupBB(llvm::StringRef tempID){
+      int id = atoi(tempID.str().c_str());
+      return bbMap[id];
+    }
+    
+    //connect references to BB and instructions
+    //initialize all edges to bottom
+    void init(llvm::Module &M){
+      errs() << "Initializing all edges to bottom..." << "\n";
+      //iterate over all functions in module
+      int bbID = 0;
+			for (Module::iterator F = M.begin(), Fe = M.end(); F != Fe; ++F){
+				//iterate over all blocks in a function (that aren't the instrumented
+				for (Function::iterator B = F->begin(), Be = F->end(); B != Be; ++B) {
+          //create a BBNode for each basic block
+          B->setName(llvm::Twine(bbID));
+          //create a BBNode for each block
+          bbMap[bbID] = new BBNode(bbID,B);
+          bbID++;
+				}
+        //the start of every function is set to top
+        Function::iterator first = F->begin();
+        lookupBB(first->getName())->incoming->isTop = true;
+			}
+      //TODO : need to allow for user input at a function level?
+
+      //setup the BBNodes with their outgoing edges now that they have ids
+      for(map<int, BBNode*>::iterator it = bbMap.begin(); it != bbMap.end(); it++){
+        it->second->setup();
+      }
+    }
+    
+    vector<Edge *> getIncomingEdges(BBNode* N){
+      vector<Edge *> incomingEdges;
+      int id = atoi(N->originalBB->getName().str().c_str());
+      //3. get incoming edges from predecessors
+      for (pred_iterator PI = pred_begin(N->originalBB), E = pred_end(N->originalBB); PI != E; ++PI) {
+        //add to a vector of edges
+        BasicBlock *Pred = *PI;
+        incomingEdges.push_back(lookupBB(Pred->getName())->outgoing[id]);
+      }
+      //add currently saved incoming data as well
+      if(N->bID == 0){
+        incomingEdges.push_back(N->incoming);
+      }
+      return incomingEdges;
+    }
+
+    //run does the actual worklist algorithm...
+    void run(){
+      errs() << "Running worklist algorithm..." << "\n";
+      
+      //1. create a vector of BBNodes
+      vector<BBNode *> worklist;
+      //2. enqueue each BBNode
+      map<int, BBNode*>::iterator it;
+      for(it = bbMap.begin(); it != bbMap.end(); it++) {
+        worklist.push_back(it->second);
+      }
+      
+      while(worklist.size() > 0) {
+        //get any BBNode
+        BBNode *currentNode = worklist.back();
+        worklist.pop_back();
+        
+        //3. get incoming edges from predecessors
+        vector<Edge *> incomingEdges = getIncomingEdges(currentNode);
+        //merge these incoming edges to form the node input
+        Edge * in = optimizationLattice->merge(incomingEdges);
+        //set incoming edge to the new merged one
+        free(currentNode->incoming);
+        currentNode->incoming = in;
+        Edge * inCopy = new Edge(in);
+        
+        //4. run flow function on BBNode
+        map<int, Edge *> out = FF->m(inCopy,currentNode);
+        
+        //foreach output edge...
+        map<int, Edge *>::iterator it;
+        for(it = out.begin(); it != out.end(); it++) {
+          int id = it->first;
+          Edge * edgeOut = it->second;
+          //5. check if the output edge has changed:
+          //TODO : redo this
+          if(optimizationLattice->comparator(edgeOut,currentNode->outgoing[id]) == false){
+            free(currentNode->outgoing[id]);
+            currentNode->outgoing[id] = edgeOut;
+            BBNode * N = bbMap[id];
+            vector<Edge *> succEdges = getIncomingEdges(N);
+            Edge * result = optimizationLattice->merge(incomingEdges);
+            //6. if change: update the incoming edge and enqueue successors
+            if(optimizationLattice->comparator(result,N->incoming) == false) {
+              free(N->incoming);
+              N->incoming = result;
+              worklist.push_back(N);
+            }
+          }
+        }
+      }
+    }
+    void printBottom(){
+      
+    }
+    void printTop(){
+      
+    }
+};
+
+

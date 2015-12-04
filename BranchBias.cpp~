@@ -1,0 +1,130 @@
+
+      /*
+        Plan of attack:
+          1) get the terminator instructions from each block
+          2) filter out non-branch terminators
+          3) embed a call to a counter before the branch
+          4) figure out which successor block is the branch taken path
+          5) embed a call to a counter in the successor-taken block to increment taken count
+          6) print function ids to file
+          7) print results
+      */
+
+#define DEBUG_TYPE "BranchBias"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/TypeBuilder.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/InstIterator.h"
+#include <map>
+#include "stdio.h"
+#include "string.h"
+//#include <iostream>
+#include <fstream>
+
+
+using namespace llvm;
+namespace {
+	static IRBuilder<> builder(getGlobalContext());
+	
+  struct BranchBias : public ModulePass {
+    static char ID; // Pass identification, replacement for typeid
+
+    //iterate through all instructions, fill map.
+    BranchBias() : ModulePass(ID) {
+			errs() << "Branch Module Created" << "\n";
+		}
+
+    bool runOnModule(Module &M){
+      //initialize variables to be used in loop:
+      std::string functionString = "incrBranchTaken";
+      std::string branchString = "br";
+      std::string mainString = "main";
+      std::string callString = "call";
+      int currentID = 0;
+      Value *functionID;
+      std::ofstream newFile;
+      newFile.open("mapping.txt");
+
+      //SETUP FUNCTIONS TO INSERT
+      FunctionType *FT = FunctionType::get(
+				Type::getVoidTy(getGlobalContext()), //return type
+        Type::getInt32Ty(getGlobalContext()),	//parameter types
+				(Type *)0
+			);
+      //get total incrementor function
+			Constant* c = M.getOrInsertFunction("incrBranchTotal",FT);
+			Function* branchTotalFunc = cast<Function>(c);
+      //get taken incrementor function
+			Constant* ctaken = M.getOrInsertFunction("incrBranchTaken",FT);
+			Function* branchTakenFunc = cast<Function>(ctaken);
+      
+      //iterate over all functions in module
+			for (Module::iterator F = M.begin(), Fe = M.end(); F != Fe; ++F){
+			  //iterate over all blocks in a function
+        for (Function::iterator B = F->begin(), Be = F->end(); B != Be; ++B) {
+          //1) get the terminator instructions from each block
+          TerminatorInst * terminator = B->getTerminator();
+          //2) filter out non-branch terminators
+          if(branchString.compare((std::string)terminator->getOpcodeName()) == 0){
+            //3) embed a call to a counter before the branch
+            builder.SetInsertPoint(terminator);
+            functionID = builder.getInt32(currentID);
+						builder.CreateCall(branchTotalFunc, functionID);
+
+            //4) get the "taken" block successor.
+              //NOTE: we are currently assuming the first successor is the taken block
+            BasicBlock* successor = terminator->getSuccessor(0);
+            //5) embed a call to a counter in the successor-taken block to increment taken count
+            Instruction * first = successor->getFirstNonPHI();
+            //make sure we have not already inserted a call to increment here.
+            if(callString.compare((std::string)first->getOpcodeName()) == 0){
+              if(functionString.compare((std::string)((CallInst*)first)->getCalledFunction()->getName())){
+                builder.SetInsertPoint(first);
+						    builder.CreateCall(branchTakenFunc, functionID);
+              }
+            } else {
+              builder.SetInsertPoint(first);
+						  builder.CreateCall(branchTakenFunc, functionID);
+            }
+          } 
+        }
+        //6) print function ids to file
+        newFile << currentID << "," << (std::string)F->getName() << "\n";
+        currentID++;
+
+        //7) print results
+        //add print result function to end of main...
+				if(mainString.compare((std::string)F->getName()) == 0){
+					//move to last block in function
+					Function::iterator B = F->end();
+					--B;
+					//move to last instruction in block
+					BasicBlock::iterator I = B->end();
+					--I;
+					//fetch the printResults function
+					FunctionType *FTmain = FunctionType::get(
+						Type::getVoidTy(getGlobalContext()),
+						(Type *)0
+					);
+					Constant* cmain = M.getOrInsertFunction("printResults",FTmain);
+					Function* Rmain = cast<Function>(cmain);
+					//insert call to printResults
+					builder.SetInsertPoint(I);
+					builder.CreateCall(Rmain);
+				}
+      }
+
+      newFile.close();
+			//uncomment if you want to see all of IR
+			//M.dump();
+      return false;
+    }
+  };
+}
+
+char BranchBias::ID = 0;
+static RegisterPass<BranchBias> X("BranchBias", "Branch Bias Pass",false,false);
